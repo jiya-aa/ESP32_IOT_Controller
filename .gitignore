@@ -1,0 +1,35 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+secrets.h
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
+
+# ── Audio scratch files ────────────────────────────────────────────────────────
+command.wav
+answer.wav
+*.wav
+
+# ── Whisper model cache ───────────────────────────────────────────────────────
+# (large binary files, re-downloaded automatically)
+~/.cache/whisper/
+
+# ── OS clutter ────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
