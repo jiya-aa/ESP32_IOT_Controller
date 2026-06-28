@@ -137,33 +137,9 @@ esp32_ai/
 ├── new_test.py                 ← edge-tts (higher-quality voice) test
 ├── test_gemini2.py             ← Gemini API JSON response test
 └── server.py                   ← Minimal static HTTP server
+
 ```
 
----
-
-## 🔒 Security Notes
-
-> [!CAUTION]
-> **Never commit real credentials to git.**
-
-- `.env` is listed in `.gitignore` and will not be pushed.
-- `.env.example` (no real values) is safe to commit.
-- The WiFi password in `esp32_sketch.ino` should be moved to a `secrets.h` file (gitignored) before pushing:
-
-```cpp
-// secrets.h  (add to .gitignore)
-#define WIFI_SSID     "your_ssid"
-#define WIFI_PASSWORD "your_password"
-```
-
-```cpp
-// esp32_sketch.ino
-#include "secrets.h"
-const char* ssid     = WIFI_SSID;
-const char* password = WIFI_PASSWORD;
-```
-
----
 
 ## 🛠️ Troubleshooting
 
