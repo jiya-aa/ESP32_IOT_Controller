@@ -35,6 +35,23 @@ class ESP32Client:
         text = text[:config.OLED_MAX_CHARS]
         return self._get("/display", {"text": text})
 
+    def get_status(self) -> dict | None:
+        """Fetch time, date, and temperature from the ESP32.
+
+        Returns a dict like::
+            {"time": "14:57", "date": "01 Jul 2026",
+             "temp_c": 28.4, "temp_f": 83.2}
+        or None if the ESP32 is unreachable.
+        """
+        ok, body = self._get("/status")
+        if not ok:
+            return None
+        try:
+            import json
+            return json.loads(body)
+        except Exception:
+            return None
+
     # ── Audio (INMP441 mic / MAX98357A speaker) ─────────────────────────────
     def record(self, seconds: float = None, path: str = "command.wav") -> str:
         """Record from the ESP32 mic and save the streamed WAV to `path`.

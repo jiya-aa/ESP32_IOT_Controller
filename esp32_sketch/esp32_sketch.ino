@@ -3,138 +3,208 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <driver/i2s.h>   // legacy I2S driver (works on core 2.x & 3.x; do NOT add
-                          // an audio library that uses the new driver — they conflict)
-#include <math.h>         // sinf() for the diagnostic test tone
-#include "secrets.h"   // WIFI_SSID / WIFI_PASSWORD — copy secrets.h.example to secrets.h
+#include <driver/i2s.h>   // legacy I2S driver
+#include <math.h>
+#include <time.h>         // NTP time
+#include "secrets.h"      // WIFI_SSID / WIFI_PASSWORD
 
+// ── Custom font: FreeMonoBold9pt7b gives a clean, larger look on 128x64 OLEDs.
+// Include only one — the compiler will use it instead of the built-in 6x8 font.
+#include <Fonts/FreeSansBold9pt7b.h>   // clean sans-serif, fits ~10 chars per line
+#include <Fonts/FreeMono9pt7b.h>        // monospace — used for time/temp display
 
 const char* ssid     = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
+
+// ── NTP ───────────────────────────────────────────────────────────────────────
+const char* NTP_SERVER = "pool.ntp.org";
+const long  GMT_OFFSET = 19800;   // IST = UTC+5:30 = 5.5 * 3600
+const int   DST_OFFSET = 0;
 
 WebServer server(80);
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 
-Adafruit_SSD1306 display(
-  SCREEN_WIDTH,
-  SCREEN_HEIGHT,
-  &Wire,
-  -1
-);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
 const int LED_PIN = 2;
 
-// ── Audio (I2S) ──────────────────────────────────────────────────────────────
-// INMP441 microphone on I2S_NUM_0 (RX). MAX98357A amplifier on I2S_NUM_1 (TX).
-// Pins avoid LED (2) and the OLED I2C bus (SDA 4 / SCL 15).
-#define MIC_BCLK   26      // INMP441 SCK
-#define MIC_WS     25      // INMP441 WS
-#define MIC_SD     32      // INMP441 SD  (data out of mic → ESP32)
-#define MIC_LR     17      // INMP441 L/R, wired to TX2 — driven LOW = left channel
+// ── Audio (I2S) ───────────────────────────────────────────────────────────────
+#define MIC_BCLK   26
+#define MIC_WS     25
+#define MIC_SD     32
+#define MIC_LR     17
+#define SPK_BCLK   14
+#define SPK_LRC    27
+#define SPK_DIN    33
+#define AUDIO_RATE  16000
+#define MIC_SHIFT   11
 
-#define SPK_BCLK   14      // MAX98357A BCLK
-#define SPK_LRC    27      // MAX98357A LRC
-#define SPK_DIN    33      // MAX98357A DIN
+// ── OLED state ────────────────────────────────────────────────────────────────
+String oledText  = "";          // "" = show idle clock+temp screen
+int    scrollPos = 0;
+unsigned long lastScroll  = 0;
+unsigned long msgClearAt  = 0;  // millis() when to return to idle; 0 = never
 
-#define AUDIO_RATE  16000  // 16 kHz, 16-bit mono — matches Whisper / the PC side
-#define MIC_SHIFT   11     // INMP441 32-bit → 16-bit gain shift; raise = quieter
-
-String oledText = "";
-int scrollPos = 0;
-unsigned long lastScroll = 0;
-
-void handleLedOn() {
-
-  Serial.println("LED ON REQUEST");
-
-  digitalWrite(LED_PIN, HIGH);
-
-  server.send(200, "text/plain", "LED ON");
+// ── Simulated temperature (swap with real sensor read when you have one) ──────
+// When you connect a DHT11/22: replace this function body with sensor.readTemperature()
+float readTemperature() {
+  // Sine-wave drift ±2 °C around 28 °C — looks alive on the dashboard.
+  float t = millis() / 60000.0f;
+  return 28.0f + 2.0f * sinf(t);
 }
 
-void handleLedOff() {
-
-  Serial.println("LED OFF REQUEST");
-
-  digitalWrite(LED_PIN, LOW);
-
-  server.send(200, "text/plain", "LED OFF");
+// ── Helpers: get current time string ─────────────────────────────────────────
+String getTimeStr() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) return "--:--";
+  char buf[8];
+  strftime(buf, sizeof(buf), "%H:%M", &ti);
+  return String(buf);
 }
 
-void handleDisplay() {
-
-  oledText = server.arg("text");
-
-  Serial.println("DISPLAY REQUEST:");
-  Serial.println(oledText);
-
-  scrollPos = 0;
-  lastScroll = millis();  // reset timer from now, not from 0
-
-  server.send(200, "text/plain", "TEXT DISPLAYED");
+String getDateStr() {
+  struct tm ti;
+  if (!getLocalTime(&ti)) return "";
+  char buf[12];
+  strftime(buf, sizeof(buf), "%d %b %Y", &ti);
+  return String(buf);
 }
 
+// ── OLED rendering ────────────────────────────────────────────────────────────
+// Idle screen: large time + temp (monospace font, clear layout)
+void drawIdleScreen() {
+  display.clearDisplay();
+
+  // Time — large, top half
+  display.setFont(&FreeMono9pt7b);
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(2);
+  String t = getTimeStr();
+  display.setCursor(0, 26);
+  display.print(t);
+
+  // Date — small, below time
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
+  display.setCursor(0, 44);
+  display.print(getDateStr());
+
+  // Temperature — bottom right
+  char tempBuf[10];
+  snprintf(tempBuf, sizeof(tempBuf), "%.1fC", readTemperature());
+  // Right-align: each char ≈ 10px wide in FreeSansBold9pt7b size 1
+  int16_t tx = SCREEN_WIDTH - (strlen(tempBuf) * 10);
+  display.setCursor(max((int16_t)70, tx), 44);
+  display.print(tempBuf);
+
+  display.display();
+}
+
+// AI / message screen: scrolling text in clean sans-serif font
 void updateOLED() {
-
-  if (oledText == "")
+  // If a timed message has expired, return to idle
+  if (msgClearAt > 0 && millis() > msgClearAt) {
+    oledText  = "";
+    msgClearAt = 0;
+    drawIdleScreen();
     return;
+  }
 
-  // Scroll every 300 ms — one character at a time for smooth reading
-  if (millis() - lastScroll < 300)
+  if (oledText == "") {
+    // Refresh idle screen every second
+    static unsigned long lastIdle = 0;
+    if (millis() - lastIdle > 1000) {
+      lastIdle = millis();
+      drawIdleScreen();
+    }
     return;
+  }
 
+  // Scroll text: advance one character every 280 ms
+  if (millis() - lastScroll < 280) return;
   lastScroll = millis();
 
   display.clearDisplay();
-  display.setTextSize(1);
+  display.setFont(&FreeSansBold9pt7b);   // clean sans-serif for messages
   display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
 
-  // Show a 20-char window starting at scrollPos
-  const int WIN = 20;
+  // FreeSansBold9pt7b at size 1: ~10 px per char, 3 lines visible (y=14, 30, 46)
+  // Show a 12-char window (fits one line nicely)
+  const int WIN = 12;
   String part = oledText.substring(
     scrollPos,
     min(scrollPos + WIN, (int)oledText.length())
   );
 
-  display.setCursor(0, 0);
-  display.println(part);
+  display.setCursor(0, 18);
+  display.print(part);
   display.display();
 
-  // Advance one character; wrap back to start after a brief pause at end
   if (scrollPos + WIN < (int)oledText.length()) {
     scrollPos++;
   } else {
-    // Hold at end for ~2 s (2000/300 ≈ 7 more cycles) then restart
     static int holdCount = 0;
-    if (++holdCount >= 7) {
-      holdCount  = 0;
-      scrollPos  = 0;
+    if (++holdCount >= 8) {
+      holdCount = 0;
+      scrollPos = 0;
     }
   }
 }
 
-// ── I2S setup ────────────────────────────────────────────────────────────────
+// ── HTTP handlers ─────────────────────────────────────────────────────────────
+void handleLedOn() {
+  Serial.println("LED ON");
+  digitalWrite(LED_PIN, HIGH);
+  server.send(200, "text/plain", "LED ON");
+}
+
+void handleLedOff() {
+  Serial.println("LED OFF");
+  digitalWrite(LED_PIN, LOW);
+  server.send(200, "text/plain", "LED OFF");
+}
+
+void handleDisplay() {
+  oledText  = server.arg("text");
+  scrollPos = 0;
+  lastScroll = millis();
+  // Auto-clear after 30 s so the clock comes back
+  msgClearAt = millis() + 30000;
+  Serial.println("DISPLAY: " + oledText);
+  server.send(200, "text/plain", "TEXT DISPLAYED");
+}
+
+// GET /status — returns JSON with time, date, and temperature
+void handleStatus() {
+  float temp = readTemperature();
+  String json = "{";
+  json += "\"time\":\"" + getTimeStr() + "\",";
+  json += "\"date\":\"" + getDateStr() + "\",";
+  json += "\"temp_c\":" + String(temp, 1) + ",";
+  json += "\"temp_f\":" + String(temp * 9.0f / 5.0f + 32.0f, 1);
+  json += "}";
+  server.sendHeader("Access-Control-Allow-Origin", "*");
+  server.send(200, "application/json", json);
+}
+
+// ── I2S ──────────────────────────────────────────────────────────────────────
 void setupI2SMic() {
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = AUDIO_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,   // INMP441 needs 32-bit slots
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = 256,
-    .use_apll = false,
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
+    .dma_buf_count = 4, .dma_buf_len = 256,
+    .use_apll = false, .tx_desc_auto_clear = false, .fixed_mclk = 0
   };
   i2s_pin_config_t pins = {
-    .bck_io_num = MIC_BCLK,
-    .ws_io_num = MIC_WS,
-    .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = MIC_SD
+    .bck_io_num = MIC_BCLK, .ws_io_num = MIC_WS,
+    .data_out_num = I2S_PIN_NO_CHANGE, .data_in_num = MIC_SD
   };
   i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
   i2s_set_pin(I2S_NUM_0, &pins);
@@ -148,96 +218,69 @@ void setupI2SSpeaker() {
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 256,
-    .use_apll = false,
-    .tx_desc_auto_clear = true,
-    .fixed_mclk = 0
+    .dma_buf_count = 8, .dma_buf_len = 256,
+    .use_apll = false, .tx_desc_auto_clear = true, .fixed_mclk = 0
   };
   i2s_pin_config_t pins = {
-    .bck_io_num = SPK_BCLK,
-    .ws_io_num = SPK_LRC,
-    .data_out_num = SPK_DIN,
-    .data_in_num = I2S_PIN_NO_CHANGE
+    .bck_io_num = SPK_BCLK, .ws_io_num = SPK_LRC,
+    .data_out_num = SPK_DIN, .data_in_num = I2S_PIN_NO_CHANGE
   };
   i2s_driver_install(I2S_NUM_1, &cfg, 0, NULL);
   i2s_set_pin(I2S_NUM_1, &pins);
   i2s_zero_dma_buffer(I2S_NUM_1);
 }
 
-// Fill a 44-byte canonical PCM WAV header for 16-bit mono audio.
 void writeWavHeader(uint8_t* h, uint32_t dataBytes, uint32_t sampleRate) {
-  uint32_t byteRate   = sampleRate * 2;   // mono, 16-bit
-  uint32_t chunkSize  = 36 + dataBytes;
+  uint32_t byteRate  = sampleRate * 2;
+  uint32_t chunkSize = 36 + dataBytes;
   memcpy(h, "RIFF", 4);
   h[4]=chunkSize; h[5]=chunkSize>>8; h[6]=chunkSize>>16; h[7]=chunkSize>>24;
   memcpy(h+8, "WAVEfmt ", 8);
-  h[16]=16; h[17]=0; h[18]=0; h[19]=0;     // fmt chunk size = 16
-  h[20]=1;  h[21]=0;                        // PCM
-  h[22]=1;  h[23]=0;                        // 1 channel
+  h[16]=16; h[17]=0; h[18]=0; h[19]=0;
+  h[20]=1; h[21]=0; h[22]=1; h[23]=0;
   h[24]=sampleRate; h[25]=sampleRate>>8; h[26]=sampleRate>>16; h[27]=sampleRate>>24;
   h[28]=byteRate; h[29]=byteRate>>8; h[30]=byteRate>>16; h[31]=byteRate>>24;
-  h[32]=2; h[33]=0;                         // block align
-  h[34]=16; h[35]=0;                        // bits per sample
+  h[32]=2; h[33]=0; h[34]=16; h[35]=0;
   memcpy(h+36, "data", 4);
   h[40]=dataBytes; h[41]=dataBytes>>8; h[42]=dataBytes>>16; h[43]=dataBytes>>24;
 }
 
-// GET /record?seconds=N — stream a 16 kHz/16-bit/mono WAV captured from the mic.
 void handleRecord() {
   int seconds = server.hasArg("seconds") ? server.arg("seconds").toInt() : 5;
-  if (seconds < 1)  seconds = 1;
+  if (seconds < 1) seconds = 1;
   if (seconds > 10) seconds = 10;
-
   const uint32_t numSamples = (uint32_t)AUDIO_RATE * seconds;
   const uint32_t dataBytes  = numSamples * 2;
-
-  Serial.printf("RECORD REQUEST: %d s (%u bytes)\n", seconds, dataBytes);
-
   uint8_t header[44];
   writeWavHeader(header, dataBytes, AUDIO_RATE);
-
   server.setContentLength(44 + dataBytes);
   server.send(200, "audio/wav", "");
   server.sendContent((const char*)header, 44);
-
-  const int CHUNK = 256;          // samples per I2S read
-  int32_t raw[CHUNK];
-  int16_t out[CHUNK];
+  const int CHUNK = 256;
+  int32_t raw[CHUNK]; int16_t out[CHUNK];
   uint32_t sent = 0;
   while (sent < numSamples) {
     size_t bytesRead = 0;
     i2s_read(I2S_NUM_0, raw, sizeof(raw), &bytesRead, portMAX_DELAY);
-    int got = bytesRead / sizeof(int32_t);
-    int n = 0;
-    for (int i = 0; i < got && sent < numSamples; i++, sent++) {
-      out[n++] = (int16_t)(raw[i] >> MIC_SHIFT);   // 32-bit mic sample → 16-bit
-    }
+    int got = bytesRead / sizeof(int32_t), n = 0;
+    for (int i = 0; i < got && sent < numSamples; i++, sent++)
+      out[n++] = (int16_t)(raw[i] >> MIC_SHIFT);
     server.sendContent((const char*)out, n * sizeof(int16_t));
   }
-  Serial.println("RECORD DONE");
 }
 
-// POST /play — body is raw 16 kHz/16-bit/mono PCM (multipart file field).
-// Streamed straight to I2S; the blocking write paces the upload to real time.
 void handlePlayUpload() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_WRITE) {
-    size_t written = 0;
-    i2s_write(I2S_NUM_1, up.buf, up.currentSize, &written, portMAX_DELAY);
+    size_t w = 0;
+    i2s_write(I2S_NUM_1, up.buf, up.currentSize, &w, portMAX_DELAY);
   } else if (up.status == UPLOAD_FILE_END) {
-    i2s_zero_dma_buffer(I2S_NUM_1);   // silence the line after playback
-    Serial.printf("PLAY DONE: %u bytes\n", up.totalSize);
+    i2s_zero_dma_buffer(I2S_NUM_1);
   }
 }
 
-void handlePlayDone() {
-  server.send(200, "text/plain", "PLAYED");
-}
+void handlePlayDone() { server.send(200, "text/plain", "PLAYED"); }
 
-// Diagnostic: synthesise a sine wave on the ESP32 and play it through the amp.
-// If THIS sounds clean but /play is noise, the problem is the PCM transport, not
-// the wiring/I2S/amp. If this is also noise, check BCLK/LRC wiring + I2S config.
 void playTone(int freq, int ms) {
   const int total = (AUDIO_RATE * ms) / 1000;
   int16_t buf[256];
@@ -255,77 +298,63 @@ void playTone(int freq, int ms) {
 }
 
 void handleTone() {
-  Serial.println("TONE REQUEST");
   playTone(440, 500);
   server.send(200, "text/plain", "TONE");
 }
 
+// ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
-
   Serial.begin(115200);
-
   pinMode(LED_PIN, OUTPUT);
-
   Wire.begin(4, 15);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("OLED init failed! Check wiring.");
-    // Continue anyway — LED/display routes still work via HTTP
   }
 
+  // Boot screen
   display.clearDisplay();
-
-  display.setTextSize(2);
+  display.setFont(&FreeSansBold9pt7b);
+  display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("BOOT OK");
+  display.setCursor(0, 18);
+  display.println("Connecting...");
   display.display();
 
   WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nWiFi: " + WiFi.localIP().toString());
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
+  // Sync NTP time (IST)
+  configTime(GMT_OFFSET, DST_OFFSET, NTP_SERVER);
+  Serial.println("NTP synced.");
 
-  Serial.println();
-  Serial.println("WiFi Connected!");
-  Serial.println(WiFi.localIP());
-
-  // INMP441 L/R is wired to TX2 (GPIO 17); hold it LOW so the mic uses the
-  // left channel (matches the I2S ONLY_LEFT config). Tie to GND instead if free.
   pinMode(MIC_LR, OUTPUT);
   digitalWrite(MIC_LR, LOW);
-
   setupI2SMic();
   setupI2SSpeaker();
-  Serial.println("I2S ready");
+  playTone(440, 400);   // boot beep
 
-  // Boot self-test: a clean 440 Hz beep means wiring + I2S + amp are good.
-  playTone(440, 400);
-
-  server.on("/led/on", handleLedOn);
-  server.on("/led/off", handleLedOff);
-  server.on("/display", handleDisplay);
-  server.on("/record", handleRecord);
+  server.on("/led/on",   handleLedOn);
+  server.on("/led/off",  handleLedOff);
+  server.on("/display",  handleDisplay);
+  server.on("/status",   handleStatus);
+  server.on("/record",   handleRecord);
   server.on("/play", HTTP_POST, handlePlayDone, handlePlayUpload);
-  server.on("/tone", handleTone);
-
+  server.on("/tone",     handleTone);
   server.begin();
 
-  Serial.println("Server Started");
+  Serial.println("Server started.");
 }
 
+// ── Loop ──────────────────────────────────────────────────────────────────────
 void loop() {
-
   server.handleClient();
-
   updateOLED();
 
-  static unsigned long last = 0;
-
-  if (millis() - last > 5000) {
-    Serial.println("ALIVE");
-    last = millis();
+  static unsigned long lastAlive = 0;
+  if (millis() - lastAlive > 5000) {
+    Serial.println("ALIVE  " + getTimeStr() + "  " + String(readTemperature(), 1) + "C");
+    lastAlive = millis();
   }
 }
