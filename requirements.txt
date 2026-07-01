@@ -8,6 +8,7 @@ edge-tts            # Higher-quality online TTS (used in new_test.py)
 requests            # HTTP calls to the ESP32
 google-genai        # Gemini 2.5 Flash API
 python-dotenv       # Load .env automatically
+streamlit           # Web dashboard frontend
 
 # Optional: uncomment when building the web frontend backend
 # fastapi
