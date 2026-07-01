@@ -112,12 +112,14 @@ def _init():
     defaults = {
         "history":      [],
         "led_state":    None,
+        "relay_state":  None,
+        "pump_state":   None,
         "oled_text":    "",
         "esp32_online": None,
         "controller":   None,
         "recording":    False,
-        "sensor":       None,   # last /status payload
-        "last_poll":    0,      # timestamp of last sensor poll
+        "sensor":       None,
+        "last_poll":    0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -147,7 +149,10 @@ def poll_sensor(force: bool = False):
     st.session_state.last_poll = now
     if data is not None:
         st.session_state.esp32_online = True
-    # don't flip to offline on a single miss — just leave last reading
+        # Sync device states from the ESP32's own pin readings
+        st.session_state.led_state   = data.get("led")   == "on"
+        st.session_state.relay_state = data.get("relay") == "on"
+        st.session_state.pump_state  = data.get("pump")  == "on"
 
 
 def add_history(role: str, text: str):
@@ -163,9 +168,13 @@ def run_command(text: str):
     if reply:
         add_history("ai", reply)
     for action in result.get("actions", []):
-        if action["mode"] == "LED_ON"  and action["ok"]: st.session_state.led_state = True
-        if action["mode"] == "LED_OFF" and action["ok"]: st.session_state.led_state = False
-        if action["mode"] in ("DISPLAY","CHAT") and action.get("text"):
+        if action["mode"] == "LED_ON"    and action["ok"]: st.session_state.led_state   = True
+        if action["mode"] == "LED_OFF"   and action["ok"]: st.session_state.led_state   = False
+        if action["mode"] == "RELAY_ON"  and action["ok"]: st.session_state.relay_state = True
+        if action["mode"] == "RELAY_OFF" and action["ok"]: st.session_state.relay_state = False
+        if action["mode"] == "PUMP_ON"   and action["ok"]: st.session_state.pump_state  = True
+        if action["mode"] == "PUMP_OFF"  and action["ok"]: st.session_state.pump_state  = False
+        if action["mode"] in ("DISPLAY", "CHAT") and action.get("text"):
             st.session_state.oled_text = action["text"][:80]
 
 
@@ -225,26 +234,21 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Row 1: Sensor cards + LED + OLED ─────────────────────────────────────────
-col_time, col_temp, col_led, col_oled = st.columns([1, 1, 1, 2])
+# ── Row 1: Sensor cards + devices + OLED ─────────────────────────────────────
+col_time, col_temp, col_led, col_relay, col_pump = st.columns([1, 1, 1, 1, 1])
 
 sensor = st.session_state.sensor
 
 # ── Time card ─────────────────────────────────────────────────────────────────
 with col_time:
-    if sensor:
-        esp_time = sensor.get("time", "--:--")
-        esp_date = sensor.get("date", "")
-    else:
-        esp_time = datetime.now().strftime("%H:%M")
-        esp_date = datetime.now().strftime("%d %b %Y")
-
+    esp_time = sensor.get("time", "--:--") if sensor else datetime.now().strftime("%H:%M")
+    esp_date = sensor.get("date", "")       if sensor else datetime.now().strftime("%d %b %Y")
     st.markdown(
         f'<div class="sensor-card">'
         f'<div class="sensor-label">🕐 ESP32 Time</div>'
         f'<div class="sensor-value">{esp_time}</div>'
         f'<div class="sensor-sub">{esp_date}</div>'
-        f'{"" if sensor else "<div style=\"font-size:.7rem;color:#ef4444;margin-top:.3rem\">PC clock (ESP32 offline)</div>"}'
+        f'{"" if sensor else "<div style=\"font-size:.7rem;color:#ef4444;margin-top:.3rem\">PC clock</div>"}'
         f'</div>',
         unsafe_allow_html=True
     )
@@ -252,61 +256,70 @@ with col_time:
 # ── Temperature card ──────────────────────────────────────────────────────────
 with col_temp:
     if sensor:
-        tc  = sensor.get("temp_c", 0.0)
-        tf  = sensor.get("temp_f", 0.0)
-        cls = temp_color_class(tc)
-        temp_disp = f'<span class="{cls}">{tc:.1f}°C</span>'
-        temp_sub  = f"{tf:.1f}°F"
-        src_note  = ""
+        tc   = sensor.get("temp_c", 0.0)
+        tf   = sensor.get("temp_f", 0.0)
+        cls  = temp_color_class(tc)
+        t_display = f'<span class="{cls}">{tc:.1f}°C</span>'
+        t_sub     = f"{tf:.1f}°F"
+        t_note    = ""
     else:
-        temp_disp = '<span style="color:#64748b">--°C</span>'
-        temp_sub  = "No data"
-        src_note  = '<div style="font-size:.7rem;color:#ef4444;margin-top:.3rem">ESP32 offline</div>'
-
+        t_display = '<span style="color:#64748b">--°C</span>'
+        t_sub     = "No data"
+        t_note    = '<div style="font-size:.7rem;color:#ef4444;margin-top:.3rem">ESP32 offline</div>'
     st.markdown(
         f'<div class="sensor-card">'
         f'<div class="sensor-label">🌡️ Temperature</div>'
-        f'<div class="sensor-value">{temp_disp}</div>'
-        f'<div class="sensor-sub">{temp_sub}</div>'
-        f'{src_note}'
+        f'<div class="sensor-value">{t_display}</div>'
+        f'<div class="sensor-sub">{t_sub}</div>{t_note}'
         f'</div>',
         unsafe_allow_html=True
     )
-    if st.button("🔄 Refresh", key="btn_refresh_sensor", use_container_width=True):
-        poll_sensor(force=True)
-        st.rerun()
+    if st.button("🔄", key="btn_refresh", use_container_width=True, help="Refresh sensor"):
+        poll_sensor(force=True); st.rerun()
 
-# ── LED card ──────────────────────────────────────────────────────────────────
-with col_led:
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-    st.markdown('<p class="section-title">💡 LED Control</p>', unsafe_allow_html=True)
-    led_icon  = "💡" if st.session_state.led_state else "🔦"
-    led_label = "ON" if st.session_state.led_state else "OFF"
-    st.markdown(
-        f"<div style='text-align:center;font-size:2.4rem;margin:.3rem 0'>{led_icon}</div>"
-        f"<div style='text-align:center;color:#94a3b8;font-size:.82rem;margin-bottom:.6rem'>"
-        f"GPIO 2 — {led_label}</div>",
-        unsafe_allow_html=True
-    )
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("ON ☀️", use_container_width=True, key="btn_on"):
-            run_command("turn on led"); st.rerun()
-    with c2:
-        if st.button("OFF 🌑", use_container_width=True, key="btn_off"):
-            run_command("turn off led"); st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
+# ── Device card helper ────────────────────────────────────────────────────────
+def device_card(col, label: str, icon_on: str, icon_off: str,
+                state, cmd_on: str, cmd_off: str, btn_key: str):
+    with col:
+        st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+        st.markdown(f'<p class="section-title">{label}</p>', unsafe_allow_html=True)
+        icon  = icon_on  if state else icon_off
+        lbl   = "ON"     if state else "OFF"
+        st.markdown(
+            f"<div style='text-align:center;font-size:2.2rem;margin:.3rem 0'>{icon}</div>"
+            f"<div style='text-align:center;color:#94a3b8;font-size:.78rem;margin-bottom:.5rem'>{lbl}</div>",
+            unsafe_allow_html=True
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("ON",  use_container_width=True, key=f"{btn_key}_on"):
+                run_command(cmd_on);  st.rerun()
+        with c2:
+            if st.button("OFF", use_container_width=True, key=f"{btn_key}_off"):
+                run_command(cmd_off); st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-# ── OLED card ─────────────────────────────────────────────────────────────────
+device_card(col_led,   "💡 LED",   "💡", "🔦",
+            st.session_state.led_state,
+            "turn on led",   "turn off led",   "led")
+device_card(col_relay, "⚡ Relay", "🔴", "⚫",
+            st.session_state.relay_state,
+            "turn on relay", "turn off relay", "relay")
+device_card(col_pump,  "💧 Pump",  "🟦", "⬜",
+            st.session_state.pump_state,
+            "start pump",    "stop pump",      "pump")
+
+# ── OLED + Status row ────────────────────────────────────────────────────────
+col_oled, col_status = st.columns([3, 1])
+
 with col_oled:
     st.markdown('<div class="glass-card">', unsafe_allow_html=True)
     st.markdown('<p class="section-title">🖥️ OLED Display</p>', unsafe_allow_html=True)
 
-    # Show what's on the OLED (or current time+temp if idle)
     if st.session_state.oled_text:
         preview = st.session_state.oled_text
     elif sensor:
-        preview = f"🕐 {sensor.get('time','--:--')}   🌡 {sensor.get('temp_c',0):.1f}°C"
+        preview = f"🕐 {sensor.get('time','--:--')}   🌡 {sensor.get('temp_c',0):.1f}°C   ⚡ Relay {sensor.get('relay','?')}   💧 Pump {sensor.get('pump','?')}"
     else:
         preview = "— idle (clock + temp) —"
 
@@ -322,6 +335,26 @@ with col_oled:
     with c2:
         if st.button("✖ Clear", use_container_width=True, key="btn_oled_clear"):
             st.session_state.oled_text = ""
+    st.markdown('</div>', unsafe_allow_html=True)
+
+with col_status:
+    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">📡 System Status</p>', unsafe_allow_html=True)
+    rows = [
+        ("ESP32",  "🟢 Online"  if st.session_state.esp32_online else ("🔴 Offline" if st.session_state.esp32_online is False else "⚪ Unknown")),
+        ("LED",    f"{'💡 ON' if st.session_state.led_state else '🔦 OFF'}"),
+        ("Relay",  f"{'🔴 ON' if st.session_state.relay_state else '⚫ OFF'}"),
+        ("Pump",   f"{'🟦 ON' if st.session_state.pump_state  else '⬜ OFF'}"),
+        ("Audio",  f"🎤 {config.AUDIO_DEVICE.upper()}"),
+        ("Whisper",f"📝 {config.WHISPER_MODEL}"),
+    ]
+    for label, val in rows:
+        st.markdown(
+            f"<div style='display:flex;justify-content:space-between;margin:.35rem 0;"
+            f"font-size:.82rem'><span style='color:#94a3b8'>{label}</span>"
+            f"<span>{val}</span></div>",
+            unsafe_allow_html=True
+        )
     st.markdown('</div>', unsafe_allow_html=True)
 
 st.markdown("---")

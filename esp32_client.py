@@ -25,15 +25,17 @@ class ESP32Client:
         except Exception as e:
             return False, f"ESP32 error ({path}): {e}"
 
-    def led_on(self) -> tuple[bool, str]:
-        return self._get("/led/on")
+    def led_on(self)  -> tuple[bool, str]: return self._get("/led/on")
+    def led_off(self) -> tuple[bool, str]: return self._get("/led/off")
 
-    def led_off(self) -> tuple[bool, str]:
-        return self._get("/led/off")
+    def relay_on(self)  -> tuple[bool, str]: return self._get("/relay/on")
+    def relay_off(self) -> tuple[bool, str]: return self._get("/relay/off")
+
+    def pump_on(self)  -> tuple[bool, str]: return self._get("/pump/on")
+    def pump_off(self) -> tuple[bool, str]: return self._get("/pump/off")
 
     def display(self, text: str) -> tuple[bool, str]:
-        text = text[:config.OLED_MAX_CHARS]
-        return self._get("/display", {"text": text})
+        return self._get("/display", {"text": text[:config.OLED_MAX_CHARS]})
 
     def get_status(self) -> dict | None:
         """Fetch time, date, and temperature from the ESP32.

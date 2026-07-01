@@ -64,10 +64,22 @@ class Controller:
     def _keyword_actions(self, text: str) -> list[dict] | None:
         """Fast path that skips the API for obvious commands. None = no match."""
         cmd = text.lower()
+        # LED
         if "turn on led" in cmd or "led on" in cmd:
             return [{"mode": "LED_ON"}]
         if "turn off led" in cmd or "led off" in cmd:
             return [{"mode": "LED_OFF"}]
+        # Relay
+        if any(p in cmd for p in ("turn on relay", "relay on", "switch on relay", "activate relay")):
+            return [{"mode": "RELAY_ON"}]
+        if any(p in cmd for p in ("turn off relay", "relay off", "switch off relay", "deactivate relay")):
+            return [{"mode": "RELAY_OFF"}]
+        # Pump
+        if any(p in cmd for p in ("turn on pump", "pump on", "start pump", "activate pump")):
+            return [{"mode": "PUMP_ON"}]
+        if any(p in cmd for p in ("turn off pump", "pump off", "stop pump", "deactivate pump")):
+            return [{"mode": "PUMP_OFF"}]
+        # OLED
         if cmd.startswith("display "):
             return [{"mode": "DISPLAY", "text": text[8:].strip()}]
         return None
@@ -87,6 +99,26 @@ class Controller:
                 results.append({"mode": mode, "ok": ok, "detail": detail, "text": None})
                 replies.append("LED turned off" if ok else detail)
 
+            elif mode == "RELAY_ON":
+                ok, detail = self.esp32.relay_on()
+                results.append({"mode": mode, "ok": ok, "detail": detail, "text": None})
+                replies.append("Relay switched on" if ok else detail)
+
+            elif mode == "RELAY_OFF":
+                ok, detail = self.esp32.relay_off()
+                results.append({"mode": mode, "ok": ok, "detail": detail, "text": None})
+                replies.append("Relay switched off" if ok else detail)
+
+            elif mode == "PUMP_ON":
+                ok, detail = self.esp32.pump_on()
+                results.append({"mode": mode, "ok": ok, "detail": detail, "text": None})
+                replies.append("Pump started" if ok else detail)
+
+            elif mode == "PUMP_OFF":
+                ok, detail = self.esp32.pump_off()
+                results.append({"mode": mode, "ok": ok, "detail": detail, "text": None})
+                replies.append("Pump stopped" if ok else detail)
+
             elif mode == "DISPLAY":
                 disp = action.get("text", "")
                 ok, detail = (self.esp32.display(disp) if disp else (False, "no text"))
@@ -95,7 +127,6 @@ class Controller:
 
             elif mode == "CHAT":
                 answer = action.get("text", "")
-                # Mirror a trimmed answer on the OLED; full answer goes in reply.
                 self.esp32.display(answer[:config.OLED_MAX_CHARS])
                 results.append({"mode": mode, "ok": True, "detail": "chat", "text": answer})
                 replies.append(answer)

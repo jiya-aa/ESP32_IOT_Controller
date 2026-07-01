@@ -28,7 +28,17 @@ WebServer server(80);
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 
-const int LED_PIN = 2;
+const int LED_PIN   = 2;
+const int RELAY_PIN = 5;    // Relay module IN pin  (GPIO 5)
+const int PUMP_PIN  = 18;   // Pump relay IN pin    (GPIO 18)
+// Most relay modules are ACTIVE LOW: HIGH = OFF, LOW = ON.
+// Set RELAY_ACTIVE_LOW true if yours follows that convention.
+#define RELAY_ACTIVE_LOW true
+
+// Helper: write to a relay pin respecting active-low wiring
+void relayWrite(int pin, bool on) {
+  digitalWrite(pin, RELAY_ACTIVE_LOW ? !on : on);
+}
 
 // ── Audio (I2S) ───────────────────────────────────────────────────────────────
 #define MIC_BCLK   26
@@ -155,17 +165,14 @@ void updateOLED() {
 }
 
 // ── HTTP handlers ─────────────────────────────────────────────────────────────
-void handleLedOn() {
-  Serial.println("LED ON");
-  digitalWrite(LED_PIN, HIGH);
-  server.send(200, "text/plain", "LED ON");
-}
+void handleLedOn()  { Serial.println("LED ON");  digitalWrite(LED_PIN, HIGH); server.send(200,"text/plain","LED ON");  }
+void handleLedOff() { Serial.println("LED OFF"); digitalWrite(LED_PIN, LOW);  server.send(200,"text/plain","LED OFF"); }
 
-void handleLedOff() {
-  Serial.println("LED OFF");
-  digitalWrite(LED_PIN, LOW);
-  server.send(200, "text/plain", "LED OFF");
-}
+void handleRelayOn()  { Serial.println("RELAY ON");  relayWrite(RELAY_PIN, true);  server.send(200,"text/plain","RELAY ON");  }
+void handleRelayOff() { Serial.println("RELAY OFF"); relayWrite(RELAY_PIN, false); server.send(200,"text/plain","RELAY OFF"); }
+
+void handlePumpOn()  { Serial.println("PUMP ON");  relayWrite(PUMP_PIN, true);  server.send(200,"text/plain","PUMP ON");  }
+void handlePumpOff() { Serial.println("PUMP OFF"); relayWrite(PUMP_PIN, false); server.send(200,"text/plain","PUMP OFF"); }
 
 void handleDisplay() {
   oledText  = server.arg("text");
@@ -177,14 +184,22 @@ void handleDisplay() {
   server.send(200, "text/plain", "TEXT DISPLAYED");
 }
 
-// GET /status — returns JSON with time, date, and temperature
+// GET /status — returns JSON with time, date, temperature, and device states
 void handleStatus() {
   float temp = readTemperature();
+  String ledState   = digitalRead(LED_PIN) ? "on" : "off";
+  // ACTIVE_LOW: pin LOW = on
+  String relayState = (RELAY_ACTIVE_LOW ? !digitalRead(RELAY_PIN) : digitalRead(RELAY_PIN)) ? "on" : "off";
+  String pumpState  = (RELAY_ACTIVE_LOW ? !digitalRead(PUMP_PIN)  : digitalRead(PUMP_PIN))  ? "on" : "off";
+
   String json = "{";
-  json += "\"time\":\"" + getTimeStr() + "\",";
-  json += "\"date\":\"" + getDateStr() + "\",";
-  json += "\"temp_c\":" + String(temp, 1) + ",";
-  json += "\"temp_f\":" + String(temp * 9.0f / 5.0f + 32.0f, 1);
+  json += "\"time\":\""   + getTimeStr()  + "\",";
+  json += "\"date\":\""   + getDateStr()  + "\",";
+  json += "\"temp_c\":"   + String(temp, 1)                        + ",";
+  json += "\"temp_f\":"   + String(temp * 9.0f / 5.0f + 32.0f, 1) + ",";
+  json += "\"led\":\""    + ledState   + "\",";
+  json += "\"relay\":\""  + relayState + "\",";
+  json += "\"pump\":\""   + pumpState  + "\"";
   json += "}";
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.send(200, "application/json", json);
@@ -305,7 +320,9 @@ void handleTone() {
 // ── Setup ─────────────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
+  pinMode(LED_PIN,   OUTPUT); digitalWrite(LED_PIN, LOW);
+  pinMode(RELAY_PIN, OUTPUT); relayWrite(RELAY_PIN, false);  // relay off on boot
+  pinMode(PUMP_PIN,  OUTPUT); relayWrite(PUMP_PIN,  false);  // pump  off on boot
   Wire.begin(4, 15);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
@@ -335,13 +352,17 @@ void setup() {
   setupI2SSpeaker();
   playTone(440, 400);   // boot beep
 
-  server.on("/led/on",   handleLedOn);
-  server.on("/led/off",  handleLedOff);
-  server.on("/display",  handleDisplay);
-  server.on("/status",   handleStatus);
-  server.on("/record",   handleRecord);
-  server.on("/play", HTTP_POST, handlePlayDone, handlePlayUpload);
-  server.on("/tone",     handleTone);
+  server.on("/led/on",    handleLedOn);
+  server.on("/led/off",   handleLedOff);
+  server.on("/relay/on",  handleRelayOn);
+  server.on("/relay/off", handleRelayOff);
+  server.on("/pump/on",   handlePumpOn);
+  server.on("/pump/off",  handlePumpOff);
+  server.on("/display",   handleDisplay);
+  server.on("/status",    handleStatus);
+  server.on("/record",    handleRecord);
+  server.on("/play",  HTTP_POST, handlePlayDone, handlePlayUpload);
+  server.on("/tone",      handleTone);
   server.begin();
 
   Serial.println("Server started.");
