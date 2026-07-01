@@ -1,0 +1,15 @@
+# Core runtime dependencies
+openai-whisper      # Speech-to-text (runs locally; needs ffmpeg on PATH)
+sounddevice         # Microphone capture
+scipy               # WAV read/write + audio resampling
+numpy               # PCM buffer handling for ESP32 audio streaming
+pyttsx3             # Offline text-to-speech
+edge-tts            # Higher-quality online TTS (used in new_test.py)
+requests            # HTTP calls to the ESP32
+google-genai        # Gemini 2.5 Flash API
+python-dotenv       # Load .env automatically
+
+# Optional: uncomment when building the web frontend backend
+# fastapi
+# uvicorn[standard]
+# python-multipart    # audio file uploads

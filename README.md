@@ -21,22 +21,42 @@ to control real hardware with natural language.
 ## ✨ How It Works
 
 ```
-🎤 Microphone
+🎤 Microphone (PC or ESP32 INMP441)
      │
-     ▼  (5-second audio clip)
- Whisper STT  ──────────────────►  Text command
+     ▼  (WAV clip)
+ Whisper STT  ──────────────────────►  Text command
      │
      ▼
- Keyword check (fast path)        ──►  LED on/off, OLED display
+ Keyword check (fast path)           ──►  LED on/off, OLED display
      │  (no match)
      ▼
- Gemini 2.5 Flash  ──────────────►  JSON action or chat answer
+ Gemini 2.5 Flash  ─────────────────►  JSON action or chat answer
      │
      ▼
- ESP32 HTTP Request  ────────────►  GPIO / OLED on physical hardware
+ ESP32 HTTP Request  ───────────────►  GPIO / OLED / I2S speaker
      │
      ▼
- pyttsx3 TTS  ───────────────────►  Spoken response back to user
+ TTS (PC speaker or ESP32 MAX98357A) ►  Spoken response
+```
+
+---
+
+## 🏗️ Architecture
+
+The project is split into clean, reusable modules:
+
+```
+iot_control.py         ← CLI entry point (thin voice loop)
+    ↓
+controller.py          ← Orchestration core — pluggable into a web backend
+    ├── assistant.py       ← Gemini AI interpreter (returns structured JSON actions)
+    ├── esp32_client.py    ← HTTP client for the ESP32 REST API
+    ├── speech.py          ← STT + microphone (Whisper, PC or ESP32 mic)
+    └── tts.py             ← TTS (pyttsx3 local or streamed PCM to ESP32 speaker)
+            └── tts_worker.py  ← Subprocess to avoid pyttsx3/SAPI5 deadlock on Windows
+
+config.py              ← Central config (loads .env, validates secrets)
+requirements.txt       ← Python dependencies
 ```
 
 ---
@@ -47,7 +67,11 @@ to control real hardware with natural language.
 |-----------|--------|
 | **ESP32 DevKit** | Any Wi-Fi-capable variant |
 | **SSD1306 OLED 128×64** | I²C — SDA = GPIO 4, SCL = GPIO 15 |
+| **INMP441 mic** *(optional)* | I2S mic — BCLK=26, WS=25, SD=32, L/R=17 |
+| **MAX98357A amp** *(optional)* | I2S amp — BCLK=14, LRC=27, DIN=33 |
 | **On-board LED** | GPIO 2 (built-in) |
+
+> The mic and speaker are optional. Without them the system uses your PC's microphone and speakers (`AUDIO_DEVICE=pc`, the default).
 
 ### Wiring (OLED)
 
@@ -64,28 +88,33 @@ GPIO 15     ──►  OLED SCL
 
 ### 1. Flash the ESP32
 
-Open `esp32_sketch/esp32_sketch.ino` in the **Arduino IDE**.
+```
+esp32_sketch/
+├── esp32_sketch.ino
+├── secrets.h.example   ← copy this to secrets.h and fill in your WiFi creds
+└── secrets.h           ← gitignored, never committed
+```
 
-**Install these libraries** via *Tools → Manage Libraries*:
+Open `esp32_sketch/esp32_sketch.ino` in **Arduino IDE**.
+
+**Install libraries** via *Tools → Manage Libraries*:
 - `Adafruit SSD1306`
 - `Adafruit GFX Library`
 
-Update the WiFi credentials in the sketch, then upload.  
-After boot, open Serial Monitor (115200 baud) — the ESP32 will print its local IP.
+After boot, open Serial Monitor at 115200 baud to see the IP address.  
+A **440 Hz beep** on startup confirms the I2S speaker is wired correctly.
 
 ### 2. Set Up Python
 
 ```bash
-pip install sounddevice scipy openai-whisper pyttsx3 requests google-genai python-dotenv
+pip install -r requirements.txt
 ```
 
-> **FFmpeg is required by Whisper.**  
-> Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add it to your PATH (or set the path in `iot_control.py`).
+> **FFmpeg is required by Whisper.** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and either add to PATH or set `FFMPEG_PATH` in `.env`.
 
-### 3. Configure Your Secrets
+### 3. Configure Secrets
 
 ```bash
-# Copy the example file
 cp .env.example .env
 ```
 
@@ -94,9 +123,13 @@ Edit `.env`:
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 ESP32_IP=192.168.1.72        # ← your ESP32's IP from Serial Monitor
+FFMPEG_PATH=C:\path\to\ffmpeg\bin   # optional, if not on PATH
+
+# Audio routing: "pc" (default) or "esp32" (INMP441 mic + MAX98357A speaker)
+AUDIO_DEVICE=pc
 ```
 
-Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com/apikey).
+Get a free API key at [aistudio.google.com](https://aistudio.google.com/apikey).
 
 ### 4. Run
 
@@ -104,18 +137,16 @@ Get a free Gemini API key at [aistudio.google.com](https://aistudio.google.com/a
 python iot_control.py
 ```
 
-Say something. The program listens for 5 seconds, transcribes, acts.
-
 ---
 
 ## 🗣️ Voice Commands
 
 | What you say | What happens |
 |-------------|--------------|
-| `"turn on LED"` / `"LED on"` | GPIO 2 → HIGH |
-| `"turn off LED"` / `"LED off"` | GPIO 2 → LOW |
-| `"display Good morning"` | Scrolls text on OLED |
-| *Any question or command* | Gemini answers → spoken aloud + shown on OLED |
+| `"turn on LED"` / `"LED on"` | GPIO 2 → HIGH (fast path, no API call) |
+| `"turn off LED"` / `"LED off"` | GPIO 2 → LOW (fast path, no API call) |
+| `"display Good morning"` | Scrolls text on OLED (fast path) |
+| *Any question or command* | Sent to Gemini → answer spoken + shown on OLED |
 | `"exit"` / `"quit"` / `"stop"` | Gracefully exits |
 
 ---
@@ -124,32 +155,69 @@ Say something. The program listens for 5 seconds, transcribes, acts.
 
 ```
 esp32_ai/
-├── iot_control.py              ← Main voice-control loop
+├── iot_control.py              ← Main voice-control CLI loop
+├── controller.py               ← Orchestration core (reusable by a web backend)
+├── assistant.py                ← Gemini AI natural-language interpreter
+├── esp32_client.py             ← HTTP client for the ESP32
+├── speech.py                   ← STT + microphone recording
+├── tts.py                      ← Text-to-speech (PC or ESP32 speaker)
+├── tts_worker.py               ← Subprocess helper for pyttsx3
+├── config.py                   ← Centralised configuration
+├── requirements.txt            ← Python dependencies
+│
 ├── esp32_sketch/
-│   └── esp32_sketch.ino        ← ESP32 Arduino firmware
+│   ├── esp32_sketch.ino        ← ESP32 Arduino firmware
+│   ├── secrets.h.example       ← WiFi credentials template
+│   └── secrets.h               ← Your real creds (gitignored)
 │
-├── .env                        ← Your secrets (⛔ never commit this)
+├── .env                        ← Your secrets (⛔ never commit)
 ├── .env.example                ← Safe-to-commit template
+├── .gitignore
 │
-├── mic_test.py                 ← Sanity-check your microphone
+├── esp32_audio_test.py         ← Test ESP32 mic + speaker independently
+├── mic_test.py                 ← PC microphone sanity check
 ├── voice_test.py               ← Record → Whisper transcription test
 ├── speaker_test.py             ← pyttsx3 TTS test
-├── new_test.py                 ← edge-tts (higher-quality voice) test
-├── test_gemini2.py             ← Gemini API JSON response test
-└── server.py                   ← Minimal static HTTP server
-
+└── new_test.py                 ← edge-tts (higher-quality voice) test
 ```
 
+---
+
+## 🔌 ESP32 REST API
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/led/on` | Turn on GPIO 2 LED |
+| GET | `/led/off` | Turn off GPIO 2 LED |
+| GET | `/display?text=...` | Show scrolling text on OLED |
+| GET | `/record?seconds=N` | Stream WAV from INMP441 mic (1–10 s) |
+| POST | `/play` | Receive raw 16 kHz/16-bit PCM → play via MAX98357A |
+| GET | `/tone` | Play a 440 Hz diagnostic beep |
+
+---
+
+## 🔒 Security Notes
+
+> [!CAUTION]
+> **Never commit real credentials to git.**
+
+- `.env` and `secrets.h` are in `.gitignore` and will not be pushed.
+- `.env.example` and `secrets.h.example` (no real values) are safe to commit.
+
+---
 
 ## 🛠️ Troubleshooting
 
 | Symptom | Fix |
 |---------|-----|
-| `OLED init failed` in Serial Monitor | Check SDA/SCL wiring and I²C address (try `0x3C` vs `0x3D`) |
-| Whisper prints `FP16 warning` | Already fixed — `fp16=False` is set |
-| `Gemini unavailable` after 3 retries | Check your API key and internet connection |
-| ESP32 IP not reachable | Make sure PC and ESP32 are on the same Wi-Fi network |
-| No audio recorded | Run `mic_test.py` to verify your microphone device index |
+| `OLED init failed` in Serial Monitor | Check SDA/SCL wiring; try I²C address `0x3D` |
+| No beep on boot | Check MAX98357A BCLK/LRC/DIN wiring |
+| Whisper FP16 warning | Already fixed — `fp16=False` is set |
+| `Gemini unavailable` after 3 retries | Check API key and internet connection |
+| ESP32 not reachable | Ensure PC and ESP32 are on the same Wi-Fi network |
+| No audio recorded | Run `mic_test.py` to verify your PC microphone |
+| ESP32 mic not working | Run `python esp32_audio_test.py record 3` and play back `test.wav` |
+| Wrong pitch from ESP32 speaker | Sample-rate mismatch — check `AUDIO_RATE` in sketch matches `SAMPLE_RATE` in `.env` |
 
 ---
 
@@ -158,9 +226,11 @@ esp32_ai/
 | Package | Purpose |
 |---------|---------|
 | `openai-whisper` | Speech-to-text (runs locally) |
-| `sounddevice` + `scipy` | Audio recording |
+| `sounddevice` + `scipy` | Audio recording + WAV handling |
+| `numpy` | PCM buffer math for ESP32 audio |
 | `google-genai` | Gemini 2.5 Flash API |
 | `pyttsx3` | Offline text-to-speech |
+| `edge-tts` | Higher-quality online TTS |
 | `requests` | HTTP calls to ESP32 |
 | `python-dotenv` | Load `.env` secrets automatically |
 
