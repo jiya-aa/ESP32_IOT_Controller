@@ -194,17 +194,6 @@ esp32_ai/
 | POST | `/play` | Receive raw 16 kHz/16-bit PCM → play via MAX98357A |
 | GET | `/tone` | Play a 440 Hz diagnostic beep |
 
----
-
-## 🔒 Security Notes
-
-> [!CAUTION]
-> **Never commit real credentials to git.**
-
-- `.env` and `secrets.h` are in `.gitignore` and will not be pushed.
-- `.env.example` and `secrets.h.example` (no real values) are safe to commit.
-
----
 
 ## 🛠️ Troubleshooting
 
