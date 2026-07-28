@@ -11,6 +11,7 @@ import requests
 import streamlit as st
 
 import config
+from configuration_page import render_configuration
 from controller import Controller
 from esp32_client import ESP32Client
 
@@ -103,6 +104,30 @@ html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
 .temp-normal { color: #a3e635; }
 .temp-warm   { color: #fb923c; }
 .temp-hot    { color: #f87171; }
+
+/* Configuration tutorial */
+.guide-hero {
+    padding: 1.5rem 1.6rem; margin-bottom: 1.2rem; border-radius: 20px;
+    background: linear-gradient(135deg, rgba(37,99,235,.24), rgba(124,58,237,.18));
+    border: 1px solid rgba(129,140,248,.32);
+}
+.guide-hero h1 { margin:.25rem 0 .35rem; font-size:2rem; }
+.guide-hero p { margin:0; color:#cbd5e1; }
+.guide-kicker { color:#a5b4fc; font-size:.72rem; font-weight:700; letter-spacing:.12em; }
+.tutorial-step {
+    display:flex; gap:1rem; align-items:flex-start; padding:1rem 1.1rem; margin:.65rem 0;
+    background:rgba(255,255,255,.04); border:1px solid rgba(255,255,255,.09); border-radius:14px;
+}
+.step-number {
+    flex:0 0 32px; height:32px; display:grid; place-items:center; border-radius:50%;
+    background:#4f46e5; color:white; font-weight:700;
+}
+.tutorial-step span:last-child { color:#cbd5e1; font-size:.9rem; }
+.diagram-shell {
+    overflow-x:auto; padding:.5rem; margin:.5rem 0 1.5rem; border-radius:18px;
+    background:#0b1120; border:1px solid rgba(129,140,248,.25);
+}
+.wiring-diagram { width:100%; min-width:780px; height:auto; display:block; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -120,6 +145,7 @@ def _init():
         "recording":    False,
         "sensor":       None,
         "last_poll":    0,
+        "page":          "dashboard",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -190,6 +216,17 @@ poll_sensor()
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
+    if st.session_state.page == "dashboard":
+        if st.button("🛠️ Configuration", use_container_width=True, type="primary"):
+            st.session_state.page = "configuration"
+            st.rerun()
+    else:
+        if st.button("← Back to Dashboard", use_container_width=True, type="primary"):
+            st.session_state.page = "dashboard"
+            st.rerun()
+        st.caption("Hardware & software setup guide")
+        st.markdown("---")
+
     st.markdown("## ⚙️ Settings")
     st.markdown("---")
     st.markdown('<p class="section-title">ESP32 Connection</p>', unsafe_allow_html=True)
@@ -221,6 +258,11 @@ with st.sidebar:
     if st.button("🗑️ Clear Chat", use_container_width=True):
         st.session_state.history = []
         st.rerun()
+
+
+if st.session_state.page == "configuration":
+    render_configuration()
+    st.stop()
 
 
 # ── Header ────────────────────────────────────────────────────────────────────
